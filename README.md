@@ -9,5 +9,7 @@ This software is released under a **Custom Non-Commercial License**.
 You may use and modify it for research and educational purposes with proper citation.  
 Commercial use requires prior written consent from the author.
 
+The full license is available in the LICENSE.md file in the root directory of this source tree.
+
 © 2025 Majed Kutaini, RWTH Aachen University  
 Contact: kutainimajed@gmail.de
