@@ -34,6 +34,10 @@ from vedo import Plotter, Mesh, Point, Plane
 import time
 import csv
 
+# v: Model name
+# xx: Tooth number (FDI Schema)
+v = "M1"
+xx = "11"
 
 model_file = f'Zähne/{v}/{xx}/{xx}_umschlagpunkt.stl' # Path to the digital STL file with surrounding structures
 prep_file = f'Zähne/{v}/{xx}/{xx}_präpgrenze_d.stl'  # Path to the digital STL file
@@ -1246,16 +1250,16 @@ class InteractiveRotationViewer:
         präpgrenze_k_right = self.find_bottom_right(prep_k_slice_data_resized)
 
         if präpgrenze_left:
-            self.ax.plot(präpgrenze_left[0], präpgrenze_left[1], 'yo', markersize=8, label=f'Präpgrenze top ({präpgrenze_left[0]}, {präpgrenze_left[1]})')
+            self.ax.plot(präpgrenze_left[0], präpgrenze_left[1], 'yo', markersize=8, label=f'Margin (Dig., left) {präpgrenze_left[0]}, {präpgrenze_left[1]}')
         if präpgrenze_right:
-            self.ax.plot(präpgrenze_right[0], präpgrenze_right[1], 'yo', markersize=8, label=f'Präpgrenze {präpgrenze_right[0]}, {präpgrenze_right[1]}')
+            self.ax.plot(präpgrenze_right[0], präpgrenze_right[1], 'yo', markersize=8, label=f'Margin (Dig., right) {präpgrenze_right[0]}, {präpgrenze_right[1]}')
         if präpgrenze_k_right:
-            self.ax.plot(präpgrenze_k_right[0], präpgrenze_k_right[1], 'co', markersize=8, label=f'Präpgrenze_k {präpgrenze_k_right[0]}, {präpgrenze_k_right[1]}')
+            self.ax.plot(präpgrenze_k_right[0], präpgrenze_k_right[1], 'co', markersize=8, label=f'Margin (Conv.) {präpgrenze_k_right[0]}, {präpgrenze_k_right[1]}')
         
         if sulcus_line:
             self.ax.plot([sulcus_line[0][0], sulcus_line[1][0]],
                         [sulcus_line[0][1], sulcus_line[1][1]],
-                        'b--', linewidth=1, alpha=0.5, label="Sulcusboden Detection Line")
+                        'b--', linewidth=1, alpha=0.5, label="Sulcus floor Detection Line")
         
         if vop_line:
             self.ax.plot([vop_line[0][0], vop_line[1][0]],
@@ -1266,17 +1270,39 @@ class InteractiveRotationViewer:
             extended_left, extended_right = extended_line_points
             self.ax.plot([extended_left[0], extended_right[0]],
                         [extended_left[1], extended_right[1]],
-                        'k-', linewidth=1, alpha=0.7, label="Margin Extrapolation Line")
+                        'k-', linewidth=1, alpha=0.7, label="Margin Extrapolation Line (MEL)")
             
+        
         if current_sulcusboden:
-            self.ax.plot(current_sulcusboden[0], current_sulcusboden[1], 'bo', 
-                        markersize=8, alpha=0.7, 
-                        label=f'Sulcusboden ({current_sulcusboden[0]:.0f}, {current_sulcusboden[1]:.0f}); {sulcus_distance_mm} mm')
+            if sulcus_distance_mm is not None:
+                self.ax.plot(
+                    current_sulcusboden[0], current_sulcusboden[1], 'bo',
+                    markersize=8, alpha=0.7,
+                    label=(
+                        f'Sulcus floor ({current_sulcusboden[0]:.0f}, {current_sulcusboden[1]:.0f}); '
+                        f'{sulcus_distance_mm:.2f} mm from MEL'
+                    )
+                )
+            else:
+                self.ax.plot(
+                    current_sulcusboden[0], current_sulcusboden[1], 'bo',
+                    markersize=8, alpha=0.7,
+                    label=f'Sulcus floor ({current_sulcusboden[0]:.0f}, {current_sulcusboden[1]:.0f})'
+                )
 
         if current_vop:
-            self.ax.plot(current_vop[0], current_vop[1], 'yo', 
-                        markersize=8, alpha=0.7, 
-                        label=f'Vertex of the papilla ({current_vop[0]:.0f}, {current_vop[1]:.0f}); {vop_distance_mm} mm')
+            if vop_distance_mm is not None:
+                self.ax.plot(
+                    current_vop[0], current_vop[1], 'yo',
+                    markersize=8, alpha=0.7,
+                    label=f'VOP ({current_vop[0]:.0f}, {current_vop[1]:.0f}); {vop_distance_mm:.2f} mm from MEL'
+                )
+            else:
+                self.ax.plot(
+                    current_vop[0], current_vop[1], 'yo',
+                    markersize=8, alpha=0.7,
+                    label=f'VOP ({current_vop[0]:.0f}, {current_vop[1]:.0f})'
+                )
 
         # Plot mep (only if we found an intersection and distance <= 5mm)
         if final_mep and präpgrenze_right:
