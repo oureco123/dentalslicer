@@ -34,15 +34,14 @@ from vedo import Plotter, Mesh, Point, Plane
 import time
 import csv
 
-# v: Model name (Modell 1 = M1, usw)
-# xx: Tooth number according to FDI
-
+# v ist der Modellname (Modell 1 = M1, usw)
+# xx ist die Zahnnummerierung nach FDI
 v = "M1"
 xx = "11"
 
-model_file = f'Zähne/{v}/{xx}/{xx}_umschlagpunkt.stl' # Path to the the intraoral digital impression of the abutment and surrounding structures STL file.
-prep_file = f'Zähne/{v}/{xx}/{xx}_präpgrenze_d.stl'  # Path to the digital prep margin STL file
-prep_k_file = f'Zähne/{v}/{xx}/{xx}_präpgrenze_k.stl' # Path to the conventional prep margin STL file
+model_file = f'Zähne/{v}/{xx}/{xx}_umschlagpunkt.stl'
+prep_file = f'Zähne/{v}/{xx}/{xx}_präpgrenze_d.stl'  # Path to the präpgrenze STL file
+prep_k_file = f'Zähne/{v}/{xx}/{xx}_präpgrenze_k.stl' # konv. abformung
 
 @njit(parallel=True)
 def batch_line_intersections(line_starts, line_ends, contour_points):
@@ -352,6 +351,51 @@ def intersect_margin_with_slice_advanced(slice_data, p1, p2, ref_point=None, min
         candidates.sort(key=lambda e: e[0])
         t, pt = candidates[0]
         return float(pt[0]), float(pt[1])
+
+    # Reference t and along-segment threshold
+    ref = np.asarray(ref_point, float)
+    denom = float(np.dot(d, d))
+    t_ref = 0.0 if denom == 0.0 else float(np.dot(ref - p1, d) / denom)
+    # translate the min_dist in px into parametric t distance
+    min_dt = float(min_dist_px) / max(L, 1e-9)
+    min_t = t_ref + min_dt
+
+    # Filter: only crossings strictly after min_t
+    after = [(t, p1 + t*d) for t in crossings if t > min_t]
+    if not after:
+        return None
+
+    after.sort(key=lambda x: x[0])  # increasing in t
+    choice = after[-2] if len(after) >= 2 else after[-1]
+    pt = choice[1]
+    return float(pt[0]), float(pt[1])
+
+    # Compute reference t along the segment
+    ref = np.asarray(ref_point, float)
+    denom = np.dot(d, d)
+    t_ref = 0.0 if denom == 0 else float(np.dot(ref - p1, d) / denom)
+
+    # Build (t, point) for all crossings
+    pts = [(t, p1 + t*d) for t in crossings]
+
+    # Filter: only crossings *after* ref point and at least min_dist_px away from ref_point
+    def ok(t, pt):
+        if t <= t_ref:
+            return False
+        if min_dist_px > 0:
+            if np.linalg.norm(pt - ref) < float(min_dist_px):
+                return False
+        return True
+
+    after = [(t, pt) for (t, pt) in pts if ok(t, pt)]
+    if not after:
+        return None
+
+    # Sort by t increasing, choose second-to-last if possible
+    after.sort(key=lambda x: x[0])
+    choice = after[-2] if len(after) >= 2 else after[-1]
+    pt = choice[1]
+    return float(pt[0]), float(pt[1])
 
 # 2. Optimized mesh intersection class
 class OptimizedMeshProcessor:
@@ -869,12 +913,12 @@ class InteractiveRotationViewer:
         dcol = abs(col2 - col1)
         
         row_step = 1 if row1 < row2 else -1
-        col_step = 1 if col1 < col2 else -1
+        vop_step = 1 if col1 < col2 else -1
         
         if dcol > drow:
             err = dcol / 2
             row = row1
-            for col in range(col1, col2 + col_step, col_step):
+            for col in range(col1, col2 + vop_step, vop_step):
                 if 0 <= row < image.shape[0] and 0 <= col < image.shape[1]:
                     image[row, col] = 1.0
                 err -= drow
@@ -889,7 +933,7 @@ class InteractiveRotationViewer:
                     image[row, col] = 1.0
                 err -= dcol
                 if err < 0:
-                    col += col_step
+                    col += vop_step
                     err += drow
 
     def get_slice_at_angle(self, angle_degrees):
@@ -1017,19 +1061,19 @@ class InteractiveRotationViewer:
 
     def calculate_mep_and_detection_points(self, slice_data, prep_slice_data, prep_k_slice_data):
         """
-        Unified method to calculate mep, sulcus floor, and col points.
-        Returns: (final_mep, current_sulcus_floor, current_col, extended_line_points)
+        Unified method to calculate mep, sulcusboden, and col points.
+        Returns: (final_mep, current_sulcusboden, current_vop, extended_line_points)
         """
         # Find key points using optimized methods
         präpgrenze_left = self.find_bottom_left(prep_slice_data)
         präpgrenze_right = self.find_bottom_right(prep_slice_data)
         
         final_mep = None
-        current_sulcus_floor = None
-        current_col = None
+        current_sulcusboden = None
+        current_vop = None
         extended_line_points = None
         sulcus_distance_mm = None
-        col_distance_mm = None
+        vop_distance_mm = None
         sulcustiefe = None
         
         # Calculate extended line and detection points
@@ -1051,8 +1095,8 @@ class InteractiveRotationViewer:
             # Lines for sulcus and col detection
             new_left = left + direction * 650
             new_right = right + direction * 150
-            col_left = right + direction * 40
-            col_right = right + direction * 250
+            vop_left = right + direction * 40
+            vop_right = right + direction * 250
             
             # Get contour points
             contour_points = np.column_stack(np.where(slice_data > 0))
@@ -1065,10 +1109,10 @@ class InteractiveRotationViewer:
                 # === PRE-FILTER CONTOUR SEGMENTS ===
                 # Only check segments that are in the scanning area
                 sulcus_segments = self.get_relevant_segments(contour_points_xy, new_left, new_right, perp_direction, max_steps, negative=True)
-                col_segments = self.get_relevant_segments(contour_points_xy, col_left, col_right, perp_direction, max_steps, negative=False)
+                vop_segments = self.get_relevant_segments(contour_points_xy, vop_left, vop_right, perp_direction, max_steps, negative=False)
                 
                 for step in range(0, max_steps):
-                    # === Sulcus floor Detection ===
+                    # === Sulcusboden Detection ===
                     reverse_step = max_steps - 1 - step
                     sulcus_offset = -perp_direction * reverse_step * step_size
                     shifted_left = new_left + sulcus_offset
@@ -1079,45 +1123,45 @@ class InteractiveRotationViewer:
                         p2 = sulcus_segments[i+1]
                         sulcus_intersect = self.line_intersection((shifted_left, shifted_right), (p1, p2))
                         if sulcus_intersect:
-                            current_sulcus_floor = sulcus_intersect
+                            current_sulcusboden = sulcus_intersect
                             if extended_line_points:
                                 sulcus_distance_mm = self.calculate_parallel_line_distance(
                                     extended_line_points, 
                                     (shifted_left, shifted_right)
                                 )
-                               #print(f"Sulcus floor detection distance: {sulcus_distance_mm:.2f}mm")
+                               #print(f"Sulcusboden detection distance: {sulcus_distance_mm:.2f}mm")
                             break
                     
-                    if current_sulcus_floor:
+                    if current_sulcusboden:
                         break
 
                 for step in range(0, max_steps):
                     # === Col Detection ===
                     reverse_step = max_steps - 1 - step
-                    col_offset = perp_direction * reverse_step * step_size
-                    shifted_col_left = col_left + col_offset
-                    shifted_col_right = col_right + col_offset
+                    vop_offset = perp_direction * reverse_step * step_size
+                    shifted_vop_left = vop_left + vop_offset
+                    shifted_vop_right = vop_right + vop_offset
                     
-                    for i in range(len(col_segments)-1):
-                        p1 = col_segments[i]
-                        p2 = col_segments[i+1]
+                    for i in range(len(vop_segments)-1):
+                        p1 = vop_segments[i]
+                        p2 = vop_segments[i+1]
                         if np.linalg.norm(p2 - p1) < 2:  # Only adjacent points
-                            col_intersect = self.line_intersection((shifted_col_left, shifted_col_right), (p1, p2))
-                            if col_intersect:
-                                dist_to_p1 = np.linalg.norm(np.array(col_intersect) - np.array(p1))
-                                dist_to_p2 = np.linalg.norm(np.array(col_intersect) - np.array(p2))
+                            vop_intersect = self.line_intersection((shifted_vop_left, shifted_vop_right), (p1, p2))
+                            if vop_intersect:
+                                dist_to_p1 = np.linalg.norm(np.array(vop_intersect) - np.array(p1))
+                                dist_to_p2 = np.linalg.norm(np.array(vop_intersect) - np.array(p2))
                                 if dist_to_p1 < 5 and dist_to_p2 < 5:
-                                    current_col = col_intersect
+                                    current_vop = vop_intersect
                                     # Calculate distance from extended line to col detection line
                                     if extended_line_points:
-                                        col_distance_mm = self.calculate_parallel_line_distance(
+                                        vop_distance_mm = self.calculate_parallel_line_distance(
                                             extended_line_points, 
-                                            (shifted_col_left, shifted_col_right)
+                                            (shifted_vop_left, shifted_vop_right)
                                         )
-                                        #print(f"Col detection distance: {col_distance_mm:.2f}mm")
+                                        #print(f"Col detection distance: {vop_distance_mm:.2f}mm")
                                     break
                     
-                    if current_col:
+                    if current_vop:
                         break
         
         # === mep Calculation (robust) ===
@@ -1130,12 +1174,12 @@ class InteractiveRotationViewer:
                 final_mep = None
 
         
-        if current_sulcus_floor and current_col:
+        if current_sulcusboden and current_vop:
             sulcustiefe = self.calculate_parallel_line_distance(
                                             (shifted_left, shifted_right), 
-                                            (shifted_col_left, shifted_col_right)
+                                            (shifted_vop_left, shifted_vop_right)
                                         )
-        return final_mep, current_sulcus_floor, current_col, extended_line_points, (shifted_left, shifted_right), (shifted_col_left, shifted_col_right), sulcus_distance_mm, col_distance_mm, sulcustiefe
+        return final_mep, current_sulcusboden, current_vop, extended_line_points, (shifted_left, shifted_right), (shifted_vop_left, shifted_vop_right), sulcus_distance_mm, vop_distance_mm, sulcustiefe
 
 
     def get_relevant_segments(self, contour_points_xy, base_left, base_right, perp_direction, max_steps, negative=True):
@@ -1185,13 +1229,20 @@ class InteractiveRotationViewer:
             prep_k_slice_data_resized = np.fliplr(np.flipud(prep_k_slice_data_resized))
 
         self.ax.clear()
-        self.ax.imshow(slice_data_resized, cmap='bone_r', origin='lower', interpolation='none')
-        self.ax.imshow(prep_slice_data_resized, cmap='viridis', alpha=0.5, origin='lower', interpolation='none')
-        self.ax.imshow(prep_k_slice_data_resized, cmap='plasma', alpha=0.5, origin='lower', interpolation='none')
+        from matplotlib.colors import ListedColormap
+        # Base: inverted grayscale (0=white background, 1=black lines)
+        base_cmap = 'gray_r'
+        # Overlays: transparent for 0, solid color for 1 to avoid purple tints
+        green_overlay = ListedColormap([(0, 0, 0, 0), (0, 0.8, 0, 1)])
+        blue_overlay = ListedColormap([(0, 0, 0, 0), (0, 0.4, 1, 1)])
+
+        self.ax.imshow(slice_data_resized, cmap=base_cmap, origin='lower', interpolation='none', vmin=0, vmax=1)
+        self.ax.imshow(prep_slice_data_resized, cmap=green_overlay, origin='lower', interpolation='none', vmin=0, vmax=1)
+        self.ax.imshow(prep_k_slice_data_resized, cmap=blue_overlay, origin='lower', interpolation='none', vmin=0, vmax=1)
         self.ax.set_title(f'Direct Mesh Intersection - Rotation angle: {angle:.2f}° around Z-axis, Slice along X-axis')
 
         # === Use unified calculation method ===
-        final_mep, current_sulcus_floor, current_col, extended_line_points, sulcus_line, col_line, sulcus_distance_mm, col_distance_mm, sulcustiefe = \
+        final_mep, current_sulcusboden, current_vop, extended_line_points, sulcus_line, vop_line, sulcus_distance_mm, vop_distance_mm, sulcustiefe = \
             self.calculate_mep_and_detection_points(slice_data_resized, prep_slice_data_resized, prep_k_slice_data_resized)
 
         präpgrenze_left = self.find_bottom_left(prep_slice_data_resized)
@@ -1199,21 +1250,21 @@ class InteractiveRotationViewer:
         präpgrenze_k_right = self.find_bottom_right(prep_k_slice_data_resized)
 
         if präpgrenze_left:
-            self.ax.plot(präpgrenze_left[0], präpgrenze_left[1], 'yo', markersize=8, label=f'Prep margin top ({präpgrenze_left[0]}, {präpgrenze_left[1]})')
+            self.ax.plot(präpgrenze_left[0], präpgrenze_left[1], 'yo', markersize=8, label=f'Präpgrenze top ({präpgrenze_left[0]}, {präpgrenze_left[1]})')
         if präpgrenze_right:
-            self.ax.plot(präpgrenze_right[0], präpgrenze_right[1], 'yo', markersize=8, label=f'Prep margin (Dig) {präpgrenze_right[0]}, {präpgrenze_right[1]}')
+            self.ax.plot(präpgrenze_right[0], präpgrenze_right[1], 'yo', markersize=8, label=f'Präpgrenze {präpgrenze_right[0]}, {präpgrenze_right[1]}')
         if präpgrenze_k_right:
-            self.ax.plot(präpgrenze_k_right[0], präpgrenze_k_right[1], 'co', markersize=8, label=f'Prep margin (Conv) {präpgrenze_k_right[0]}, {präpgrenze_k_right[1]}')
+            self.ax.plot(präpgrenze_k_right[0], präpgrenze_k_right[1], 'co', markersize=8, label=f'Präpgrenze_k {präpgrenze_k_right[0]}, {präpgrenze_k_right[1]}')
         
         if sulcus_line:
             self.ax.plot([sulcus_line[0][0], sulcus_line[1][0]],
                         [sulcus_line[0][1], sulcus_line[1][1]],
-                        'b--', linewidth=1, alpha=0.5, label="Sulcus floor Detection Line")
+                        'b--', linewidth=1, alpha=0.5, label="Sulcusboden Detection Line")
         
-        if col_line:
-            self.ax.plot([col_line[0][0], col_line[1][0]],
-                        [col_line[0][1], col_line[1][1]],
-                        'y--', linewidth=1, alpha=0.5, label="Col Detection Line")
+        if vop_line:
+            self.ax.plot([vop_line[0][0], vop_line[1][0]],
+                        [vop_line[0][1], vop_line[1][1]],
+                        'y--', linewidth=1, alpha=0.5, label="VOP Detection Line")
             
         if extended_line_points:
             extended_left, extended_right = extended_line_points
@@ -1221,15 +1272,15 @@ class InteractiveRotationViewer:
                         [extended_left[1], extended_right[1]],
                         'k-', linewidth=1, alpha=0.7, label="Margin Extrapolation Line")
             
-        if current_sulcus_floor:
-            self.ax.plot(current_sulcus_floor[0], current_sulcus_floor[1], 'bo', 
+        if current_sulcusboden:
+            self.ax.plot(current_sulcusboden[0], current_sulcusboden[1], 'bo', 
                         markersize=8, alpha=0.7, 
-                        label=f'Sulcus floor ({current_sulcus_floor[0]:.0f}, {current_sulcus_floor[1]:.0f}); {sulcus_distance_mm} mm')
+                        label=f'Sulcusboden ({current_sulcusboden[0]:.0f}, {current_sulcusboden[1]:.0f}); {sulcus_distance_mm} mm')
 
-        if current_col:
-            self.ax.plot(current_col[0], current_col[1], 'yo', 
+        if current_vop:
+            self.ax.plot(current_vop[0], current_vop[1], 'yo', 
                         markersize=8, alpha=0.7, 
-                        label=f'Col ({current_col[0]:.0f}, {current_col[1]:.0f}); {col_distance_mm} mm')
+                        label=f'Vertex of the papilla ({current_vop[0]:.0f}, {current_vop[1]:.0f}); {vop_distance_mm} mm')
 
         # Plot mep (only if we found an intersection and distance <= 5mm)
         if final_mep and präpgrenze_right:
@@ -1427,7 +1478,7 @@ class InteractiveRotationViewer:
                     prep_k_slice_data = np.fliplr(np.flipud(prep_k_slice_data))
 
                 # === Use unified calculation method ===
-                final_mep, current_sulcus_floor, current_col, extended_line_points, sulcus_line, col_line, sulcus_distance_mm, col_distance_mm, sulcustiefe = \
+                final_mep, current_sulcusboden, current_vop, extended_line_points, sulcus_line, vop_line, sulcus_distance_mm, vop_distance_mm, sulcustiefe = \
                     self.calculate_mep_and_detection_points(slice_data, prep_slice_data, prep_k_slice_data)
 
 
@@ -1471,28 +1522,28 @@ class InteractiveRotationViewer:
                     "präpgrenze_y": präpgrenze_point[1] if präpgrenze_point else None,
                     "präpgrenze_k_x": präpgrenze_k_point[0] if präpgrenze_k_point else None,
                     "präpgrenze_k_y": präpgrenze_k_point[1] if präpgrenze_k_point else None,
-                    "sulcus_floor_x": current_sulcus_floor[0] if current_sulcus_floor else None,
-                    "sulcus_floor_y": current_sulcus_floor[1] if current_sulcus_floor else None,
+                    "sulcusboden_x": current_sulcusboden[0] if current_sulcusboden else None,
+                    "sulcusboden_y": current_sulcusboden[1] if current_sulcusboden else None,
                     "MargExPt_x": final_mep[0] if final_mep else None,
                     "MargExPt_y": final_mep[1] if final_mep else None,
-                    "col_x": current_col[0] if current_col else None,
-                    "col_y": current_col[1] if current_col else None,
+                    "vop_x": current_vop[0] if current_vop else None,
+                    "vop_y": current_vop[1] if current_vop else None,
                     #"MargDev_pixels": MargDev_pixels,  # Distance präpgrenze (d) to (k) in pixels
                     "MargDev": MargDev_mm, # Distance in millimeters
                     #"SulcWid": SulcWid_pixels, # Distance mep to Präpgrenze (d)
                     "SulcWid": SulcWid_mm, # in mm
                     "SulcDep": sulcustiefe,
-                    "MargExPt_Sulcusfloor": sulcus_distance_mm,
-                    "Col_MargExPt": col_distance_mm,
+                    "MargExPt_Sulcusboden": sulcus_distance_mm,
+                    "vop_MargExPt": vop_distance_mm,
                 }
                 csv_rows.append(row)
         # Save the data to a CSV file
         with open(csv_filename, mode="w", newline="") as csv_file:
             fieldnames = [
                 "angle", "präpgrenze_x", "präpgrenze_y", 
-                "präpgrenze_k_x", "präpgrenze_k_y", "sulcus_floor_x", "sulcus_floor_y",
-                "MargExPt_x", "MargExPt_y", "col_x", "col_y", "MargDev", "SulcWid",
-                "SulcDep", "MargExPt_Sulcusfloor", "Col_MargExPt"
+                "präpgrenze_k_x", "präpgrenze_k_y", "sulcusboden_x", "sulcusboden_y",
+                "MargExPt_x", "MargExPt_y", "vop_x", "vop_y", "MargDev", "SulcWid",
+                "SulcDep", "MargExPt_Sulcusboden", "vop_MargExPt"
             ]
             writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
             writer.writeheader()
